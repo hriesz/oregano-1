@@ -236,6 +236,13 @@ wire_get_end_pos (Wire *wire, Coords *pos)
 }
 
 void
+wire_get_start_and_end (Wire *w, Coords *start, Coords *end)
+{
+	wire_get_start_pos (w, start);
+	wire_get_end_pos (w, end);
+}
+
+void
 wire_get_pos_and_length (Wire *wire, Coords *pos, Coords *length)
 {
 	WirePriv *priv;

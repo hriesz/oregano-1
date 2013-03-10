@@ -71,13 +71,14 @@ static gboolean		node_equal (gconstpointer a, gconstpointer b);
 static GSList		*wires_intersect (NodeStore *store, Coords *p1, Coords *p2);
 static GSList		*wire_intersect_parts (NodeStore *store, Wire *wire);
 static gboolean		is_wire_at_pos (double x1, double y1, double x2, double y2, Coords pos, gboolean endpoints);
-static gboolean		is_wire_at_coords(Wire *w, Coords *coo, gboolean endpoints);
+static gboolean		is_wire_at_coords (Wire *w, Coords *coo, gboolean endpoints);
 static GSList *		wires_at_pos (NodeStore *store, Coords pos);
 static gboolean		do_wires_intersect (double Ax, double Ay, double Bx, double By,
 					double Cx, double Cy, double Dx, double Dy,
 					Coords *pos, gboolean allow_endpoints);
 static void		node_store_finalize (GObject *self);
 static void		node_store_dispose (GObject *self);
+static gboolean		vulcanize (Wire *a, Wire *b);
 
 typedef struct {
 	Wire *wire;
@@ -349,6 +350,176 @@ node_store_remove_textbox (NodeStore *self, Textbox *text)
 }
 
 
+
+
+
+
+
+
+
+
+/*
+ * this is a private function and may not be called directly!
+ * it expects the two wires to lie on the same infinitly long line
+ * it shall not free any of it's arguments
+ *
+ * returns TRUE if successfully extended or b is NULL
+ * return FALSE if a is null or extension failed somehow
+ */
+static inline gboolean
+vulcanize_do_priv (Wire *a, Wire *b)
+{
+#if 0 /* old stuff, just copied for reference */
+	g_object_ref (ipoint->wire); //prevent de-allocation
+	item_data_unregister (ITEM_DATA (ipoint->wire));
+	wire_set_length (ipoint->wire, &length);
+	item_data_set_pos (ITEM_DATA (ipoint->wire), &pos);
+	wire_update_bbox (ipoint->wire);
+	item_data_register (ITEM_DATA (ipoint->wire));
+	g_object_unref (ipoint->wire);
+#else
+	GSList *item, *nodes;
+	Coords maxes, mines;
+	Coords start_a, end_a;
+	Coords start_b, end_b;
+	Node *nod;
+
+	NG_DEBUG ("vulcanize_priv - a=%p b=%p", a, b);
+
+	if (__unlikely (!a && !b))
+		return FALSE;
+	if (__unlikely (!b))
+		return TRUE;
+	if (__unlikely (!a))
+		return FALSE;
+
+	wire_get_start_and_end (a, &start_a, &end_a);
+	wire_get_start_and_end (b, &start_b, &end_b);
+
+
+
+	wire_get_start_pos (a, &start_a);
+	wire_get_end_pos (a, &end_a);
+
+	maxes.x = MAX(MAX(start_a.x, end_a.x), MAX(start_b.x, end_b.x));
+	maxes.y = MAX(MAX(start_a.y, end_a.y), MAX(start_b.y, end_b.y));
+	mines.x = MIN(MIN(start_a.x, end_a.x), MIN(start_b.x, end_b.x));
+	mines.y = MIN(MIN(start_a.y, end_a.y), MIN(start_b.y, end_b.y));
+
+	NG_DEBUG ("start_a.x == %lf, start_a.y == %lf", start_a.x, start_a.y);
+	NG_DEBUG ("end_a.x == %lf, end_a.y == %lf", end_a.x, end_a.y);
+	NG_DEBUG ("start_b.x == %lf, start_b.y == %lf", start_b.x, start_b.y);
+	NG_DEBUG ("end_b.x == %lf, end_b.y == %lf", end_b.x, end_b.y);
+
+#	if 0
+	// only valid if we restrict ourselfes to horiz + vertical wires
+	g_assert ((maxes.x == mines.x) || (maxes.y == mines.y));
+#	endif
+
+	maxes = coords_sub (&maxes, &mines); //len
+	wire_set_length (a, &maxes);
+	wire_update_bbox (a);
+
+	// just a pointer, no fully copy, I dare you to free it!
+	nodes = wire_get_nodes (b);
+	for (item=nodes; item!=NULL; item=item->next) {
+		nod = NODE (item->data);
+		if (__unlikely(!nod))
+			continue;
+		//FIXME recheck this
+		node_add_wire (nod, a);
+		wire_add_node (a, nod);
+		node_remove_wire (nod, b);
+		// add another ref for the object a
+		// necessary in case we unref b
+		//FIXME probably not needed,
+		//FIXME see dispose of NODE and WIRE, they only free the list, but not the elements
+		//g_object_ref (G_OBJECT (item->data));
+	}
+	g_object_unref (b);
+	return TRUE;
+#endif
+}
+
+
+
+
+/*
+ * tests if 2 wires are vulcanizeable
+ * if so, vulcanizes b ontop of a
+ * nodes owned by a will be transfered to b
+ * b will be unrefed
+ */
+gboolean
+vulcanize (Wire *a, Wire *b)
+{
+	g_return_val_if_fail (a, FALSE);
+	g_return_val_if_fail (b, FALSE);
+
+
+	Coords start_a, end_a, length_a;
+	Coords start_b, end_b, length_b;
+	guint8 score;
+
+	NG_DEBUG ("vulcanize - a=%p b=%p", a, b);
+
+	wire_get_pos_and_length (a, &start_a, &length_a);
+	wire_get_end_pos (a, &end_a);
+	wire_get_pos_and_length (b, &start_b, &length_b);
+	wire_get_end_pos (b, &end_b);
+
+	// check for equivalent gradient/slope
+	// note: this is not as unlikely as it seems
+	// after all we only have horizontal and vertical wires → 50:50
+	// minor 2D magic
+	// 1. det(len1|len2) ~ 0 === parallel lines
+	if (fabs (length_a.x*length_b.y - length_a.y*length_b.x) >= NODE_EPSILON) {
+		return FALSE;
+	}
+
+	// test if a point of a lies on b
+	// for sake of simplicity use start_a
+	// 2. length_a * lambda + start_a == start_b
+	//if (__unlikely ((start_a.x*length_a.y - start_a.y*length_a.x) - (start_b.x*length_a.y - start_b.y*length_a.x) >= NODE_EPSILON)) {
+	if (__likely (((start_a.x-start_b.x) * length_a.y - (start_a.y - start_b.y) * length_a.x) >= NODE_EPSILON)) {
+		return FALSE;
+	}
+
+	// calculate a score (allow endpoints)
+	// score 0 - no overlapping
+	// score 1 - something is fishy, this should never happen
+	// score 2 - we got a one side overlapping
+	//           x-------------x
+	//                  x---------------x
+	// score 3 - something is fishy, this should never happen
+	// score 4 - we got one wire inside another
+	//                      x----x
+	//                  x---------------x
+	//           or an exact overlay
+	//              x-------------x
+	//              x-------------x
+	score  = is_wire_at_coords (b, &start_a, TRUE) ? 1 : 0;
+	score += is_wire_at_coords (b, &end_a, TRUE) ? 1 : 0;
+	score += is_wire_at_coords (a, &start_b, TRUE) ? 1 : 0;
+	score += is_wire_at_coords (a, &end_b, TRUE) ? 1 : 0;
+	switch (score) {
+	case 0:
+		break;
+	case 2:
+	case 4:
+		return vulcanize_do_priv (a, b);
+	case 1:
+	case 3:
+	default:
+		g_warning ("something is wrong - volcano_test - score is %i", score);
+		break;
+	}
+	return FALSE;
+}
+
+
+
+
 /*
  * get a list of wires which lie on the same infinitly long line as wire
  * (useful for joining wires, if used properly, reduces number of iterations)
@@ -375,7 +546,7 @@ wires_on_line (NodeStore *store, Wire *wire)
 		// minor 2D magic
 		// 1. det(len1|len2) ~ 0 === parallel lines
 		// 2. E * lambda + P = K, eliminate lambda by dimesional expansion
-		if (__unlikely (fabs (leni.x * len.y - len.y * leni.x) < NODE_EPSILON)) {
+		if (fabs (leni.x * len.y - len.y * leni.x) < NODE_EPSILON) {
 			if (__unlikely (val - (posi.x*len.y - posi.y*len.x) < NODE_EPSILON))
 				store->wires = g_list_prepend (list, tmp);
 		}
